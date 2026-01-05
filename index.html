@@ -197,7 +197,91 @@
           : window.ethereum;
         
         if (!p) throw new Error("No wallet found");
-        return new ethers.providers.Web3Provider(p);
+        
+        // IMPORTANT: "any" lets ethers survive network switches without throwing "network changed"
+        return new ethers.providers.Web3Provider(p, "any");
+      }
+
+      // --- Chain metadata for adding networks if wallet doesn't know them (error 4902) ---
+      const CHAIN_INFO = {
+        1: { chainName: "Ethereum Mainnet", nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 }, blockExplorerUrls: ["https://etherscan.io"] },
+        10: { chainName: "OP Mainnet", nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 }, blockExplorerUrls: ["https://optimistic.etherscan.io"] },
+        56: { chainName: "BNB Smart Chain", nativeCurrency: { name: "BNB", symbol: "BNB", decimals: 18 }, blockExplorerUrls: ["https://bscscan.com"] },
+        100: { chainName: "Gnosis", nativeCurrency: { name: "xDAI", symbol: "xDAI", decimals: 18 }, blockExplorerUrls: ["https://gnosisscan.io"] },
+        137: { chainName: "Polygon", nativeCurrency: { name: "MATIC", symbol: "MATIC", decimals: 18 }, blockExplorerUrls: ["https://polygonscan.com"] },
+        8453: { chainName: "Base", nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 }, blockExplorerUrls: ["https://basescan.org"] },
+        42161: { chainName: "Arbitrum One", nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 }, blockExplorerUrls: ["https://arbiscan.io"] },
+        43114: { chainName: "Avalanche C-Chain", nativeCurrency: { name: "Avalanche", symbol: "AVAX", decimals: 18 }, blockExplorerUrls: ["https://snowtrace.io"] },
+
+        // Common testnets
+        11155111: { chainName: "Sepolia", nativeCurrency: { name: "SepoliaETH", symbol: "ETH", decimals: 18 }, blockExplorerUrls: ["https://sepolia.etherscan.io"] },
+        80002: { chainName: "Polygon Amoy", nativeCurrency: { name: "MATIC", symbol: "MATIC", decimals: 18 }, blockExplorerUrls: ["https://amoy.polygonscan.com"] },
+        421614: { chainName: "Arbitrum Sepolia", nativeCurrency: { name: "ArbSepoliaETH", symbol: "ETH", decimals: 18 }, blockExplorerUrls: ["https://sepolia.arbiscan.io"] },
+        84532: { chainName: "Base Sepolia", nativeCurrency: { name: "BaseSepoliaETH", symbol: "ETH", decimals: 18 }, blockExplorerUrls: ["https://sepolia.basescan.org"] },
+        11155420: { chainName: "OP Sepolia", nativeCurrency: { name: "OPSepoliaETH", symbol: "ETH", decimals: 18 }, blockExplorerUrls: ["https://sepolia-optimism.etherscan.io"] },
+      };
+
+      function toHexChainId(chainId) {
+        return "0x" + Number(chainId).toString(16);
+      }
+
+      async function detectRpcNetwork() {
+        const rpcUrl = $("rpcUrl").value.trim();
+        if (!rpcUrl) throw new Error("RPC URL is empty");
+
+        const rpc = new ethers.providers.JsonRpcProvider(rpcUrl);
+        const net = await rpc.getNetwork(); // { chainId, name }
+        return { chainId: net.chainId, name: net.name, rpcUrl };
+      }
+
+      async function ensureWalletOnRpcNetwork() {
+        if (!provider) throw new Error("Wallet not connected");
+
+        const rpcNet = await detectRpcNetwork();
+        const walletNet = await provider.getNetwork();
+
+        if (walletNet.chainId === rpcNet.chainId) return rpcNet;
+
+        const hexChainId = toHexChainId(rpcNet.chainId);
+
+        try {
+          updateStatus(`Switching wallet to chainId ${rpcNet.chainId} (from RPC)...`, "success");
+          await provider.send("wallet_switchEthereumChain", [{ chainId: hexChainId }]);
+        } catch (err) {
+          const code = err?.code ?? err?.data?.originalError?.code;
+
+          // 4902 = unknown chain in many wallets
+          if (code === 4902) {
+            const info = CHAIN_INFO[rpcNet.chainId];
+
+            if (!info) {
+              throw new Error(
+                `Your wallet doesn't have chainId ${rpcNet.chainId} configured. Add it in your wallet, then try again.`
+              );
+            }
+
+            updateStatus(`Adding chainId ${rpcNet.chainId} to wallet using provided RPC...`, "success");
+
+            await provider.send("wallet_addEthereumChain", [{
+              chainId: hexChainId,
+              chainName: info.chainName,
+              nativeCurrency: info.nativeCurrency,
+              rpcUrls: [rpcNet.rpcUrl],
+              blockExplorerUrls: info.blockExplorerUrls,
+            }]);
+
+            // After adding, switch again (some wallets require this explicitly)
+            await provider.send("wallet_switchEthereumChain", [{ chainId: hexChainId }]);
+          } else {
+            throw err;
+          }
+        }
+
+        // Refresh signer after switching networks
+        signer = provider.getSigner();
+        userAddress = await signer.getAddress();
+
+        return rpcNet;
       }
 
       async function connect() {
@@ -367,6 +451,10 @@
         if (!currentProxyAddress) return alert("No proxy address loaded");
         
         try {
+          // NEW: make wallet match the RPC chain before broadcasting
+          const rpcNet = await ensureWalletOnRpcNetwork();
+          updateStatus(`Broadcasting on chainId ${rpcNet.chainId}. Sending cancellation transaction...`, "success");
+
           const proxyContract = new ethers.Contract(currentProxyAddress, PROXY_ABI, signer);
           
           const orderTuple = {
@@ -380,8 +468,6 @@
             makerTraits: ethers.BigNumber.from($("orderMakerTraits").value)
           };
 
-          updateStatus("Sending cancellation transaction...", "success");
-          
           const tx = await proxyContract.cancelOrder(orderTuple);
           updateStatus(`Tx sent: ${tx.hash}. Waiting for confirmation...`);
           
