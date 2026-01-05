@@ -222,16 +222,31 @@
       };
 
       function toHexChainId(chainId) {
-        return "0x" + Number(chainId).toString(16);
+        const num = Number(chainId);
+        if (!Number.isInteger(num) || num <= 0) {
+          throw new Error(`Invalid chainId: ${chainId}`);
+        }
+        return "0x" + num.toString(16);
       }
 
       async function detectRpcNetwork() {
         const rpcUrl = $("rpcUrl").value.trim();
         if (!rpcUrl) throw new Error("RPC URL is empty");
+        
+        // Basic URL validation
+        try {
+          new URL(rpcUrl);
+        } catch (e) {
+          throw new Error("Invalid RPC URL format");
+        }
 
         const rpc = new ethers.providers.JsonRpcProvider(rpcUrl);
         const net = await rpc.getNetwork(); // { chainId, name }
         return { chainId: net.chainId, name: net.name, rpcUrl };
+      }
+
+      function extractErrorCode(err) {
+        return err?.code ?? err?.data?.originalError?.code;
       }
 
       async function ensureWalletOnRpcNetwork() {
@@ -248,7 +263,7 @@
           updateStatus(`Switching wallet to chainId ${rpcNet.chainId} (from RPC)...`, "success");
           await provider.send("wallet_switchEthereumChain", [{ chainId: hexChainId }]);
         } catch (err) {
-          const code = err?.code ?? err?.data?.originalError?.code;
+          const code = extractErrorCode(err);
 
           // 4902 = unknown chain in many wallets
           if (code === 4902) {
