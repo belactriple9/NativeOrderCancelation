@@ -246,7 +246,11 @@
       }
 
       function extractErrorCode(err) {
-        return err?.code ?? err?.data?.originalError?.code;
+        // Try different wallet error structures
+        return err?.code 
+          ?? err?.data?.originalError?.code 
+          ?? err?.error?.code
+          ?? (typeof err?.message === 'string' && err.message.includes('4902') ? 4902 : undefined);
       }
 
       async function ensureWalletOnRpcNetwork() {
